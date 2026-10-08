@@ -1,16 +1,20 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import dynamic from "next/dynamic";
 import {
   Building,
   Calendar,
+  Clock,
   FileSpreadsheet,
   FileText,
   Funnel,
   Globe,
   Hash,
+  LayoutGrid,
   LoaderCircle,
   Mail,
+  Map as MapIcon,
   MapPin,
   MapPinned,
   Phone,
@@ -18,9 +22,42 @@ import {
   Star,
   User,
   Users,
+  X,
 } from "lucide-react";
 import type { Lead } from "@/lib/types";
 import { qualidadeLead } from "@/lib/qualidade";
+import {
+  COR_FAIXA,
+  chaveBairro,
+  faixaIdade,
+  assinarHistorico,
+  atualizarHistorico,
+  historicoAtual,
+  historicoServidor,
+  hojeISO,
+  idadeDias,
+  registrarBusca,
+  rotuloIdade,
+  type EntradaHistorico,
+  type FaixaIdade,
+} from "@/lib/historico";
+import { geocodificarEndereco, localizarBairro, NominatimRateLimit, type Coordenada } from "@/lib/nominatim";
+import type { Cobertura, Pin } from "@/components/MapComponent";
+
+// Leaflet acessa window: só pode ser carregado no navegador
+const MapComponent = dynamic(() => import("@/components/MapComponent"), {
+  ssr: false,
+  loading: () => <div className="h-[600px] animate-pulse rounded-xl bg-gray-900" />,
+});
+
+const CLASSE_FAIXA: Record<FaixaIdade, string> = {
+  recente: "bg-emerald-500/15 text-emerald-300 ring-emerald-500/30 hover:bg-emerald-500/25",
+  medio: "bg-amber-500/15 text-amber-300 ring-amber-500/30 hover:bg-amber-500/25",
+  antigo: "bg-gray-500/15 text-gray-400 ring-gray-500/30 hover:bg-gray-500/25",
+};
+
+// Pins: roxo = ⭐⭐⭐, azul = ⭐⭐, cinza = ⭐ ou sem estrela
+const COR_PIN = ["#6b7280", "#6b7280", "#2563eb", "#9333ea"];
 
 type FiltroTelefone = "todos" | "com" | "sem" | "completos";
 
@@ -95,6 +132,34 @@ export default function Home() {
   const [filtroTexto, setFiltroTexto] = useState("");
   const [filtroTipo, setFiltroTipo] = useState("");
   const [filtroTelefone, setFiltroTelefone] = useState<FiltroTelefone>("todos");
+  const [aba, setAba] = useState<"leads" | "mapa">("leads");
+  // Histórico vive no localStorage; no servidor (prerender) começa vazio
+  const historico = useSyncExternalStore(assinarHistorico, historicoAtual, historicoServidor);
+  const bairrosLocalizando = useRef(new Set<string>());
+  // Coordenadas por id do lead; null = endereço não encontrado
+  const [coords, setCoords] = useState<Record<string, Coordenada | null>>({});
+  const [geoProgresso, setGeoProgresso] = useState<{ feitos: number; total: number } | null>(null);
+  const [geoAviso, setGeoAviso] = useState("");
+  const [enquadrarEm, setEnquadrarEm] = useState(0);
+  // Incrementado a cada nova busca para interromper uma geocodificação em andamento
+  const geoExecucao = useRef(0);
+
+  // Busca no Nominatim o contorno de cada bairro do histórico que ainda não tem (em segundo plano)
+  useEffect(() => {
+    for (const entrada of historico) {
+      const chave = chaveBairro(entrada);
+      if (entrada.geo !== undefined || bairrosLocalizando.current.has(chave)) continue;
+      bairrosLocalizando.current.add(chave);
+      localizarBairro(entrada.bairro, entrada.cidade)
+        .then((geo) =>
+          atualizarHistorico((lista) => lista.map((e) => (chaveBairro(e) === chave ? { ...e, geo } : e)))
+        )
+        .catch(() => {
+          // Falha temporária (rede/limite): libera para tentar de novo na próxima mudança do histórico
+        })
+        .finally(() => bairrosLocalizando.current.delete(chave));
+    }
+  }, [historico]);
 
   const tipos = useMemo(
     () => Array.from(new Set(leads.map((l) => l.tipo))).sort((a, b) => a.localeCompare(b)),
@@ -136,6 +201,10 @@ export default function Home() {
     setFiltroTexto("");
     setFiltroTipo("");
     setFiltroTelefone("todos");
+    geoExecucao.current++;
+    setCoords({});
+    setGeoProgresso(null);
+    setGeoAviso("");
 
     // Busca um bairro por vez para mostrar o progresso
     // e junta tudo, removendo duplicatas por nome + endereço
@@ -158,6 +227,10 @@ export default function Home() {
           return true;
         });
         setLeads((atuais) => [...atuais, ...novos]);
+        if (data.leads.length > 0) {
+          const entrada = { bairro, cidade: cidade.trim(), data: hojeISO(), total: data.leads.length };
+          atualizarHistorico((lista) => registrarBusca(lista, entrada));
+        }
       } catch (err) {
         erros.push(`${bairro}: ${err instanceof Error ? err.message : "Erro na busca"}`);
       }
@@ -168,6 +241,49 @@ export default function Home() {
     setProgresso("");
     setCarregando(false);
     setBuscou(true);
+  }
+
+  // Geocodifica um endereço por vez (a fila em lib/nominatim garante 1 req/s); endereços em cache são instantâneos
+  async function mostrarNoMapa() {
+    const execucao = ++geoExecucao.current;
+    setAba("mapa");
+    setGeoAviso("");
+    const pendentes = leads.filter((l) => !(l.id in coords));
+    setGeoProgresso({ feitos: 0, total: pendentes.length });
+    for (const [i, lead] of pendentes.entries()) {
+      try {
+        const c = await geocodificarEndereco(lead.endereco);
+        if (geoExecucao.current !== execucao) return;
+        setCoords((atual) => ({ ...atual, [lead.id]: c }));
+      } catch (err) {
+        if (geoExecucao.current !== execucao) return;
+        if (err instanceof NominatimRateLimit) {
+          setGeoAviso("O Nominatim limitou as consultas. Tente continuar em alguns minutos.");
+          break;
+        }
+        setCoords((atual) => ({ ...atual, [lead.id]: null }));
+      }
+      setGeoProgresso({ feitos: i + 1, total: pendentes.length });
+    }
+    if (geoExecucao.current !== execucao) return;
+    setGeoProgresso(null);
+    setEnquadrarEm(Date.now());
+  }
+
+  function usarBairroDoHistorico(e: EntradaHistorico) {
+    const linhas = bairros
+      .split("\n")
+      .map((b) => b.trim())
+      .filter(Boolean);
+    if (!linhas.some((b) => b.toLowerCase() === e.bairro.toLowerCase())) {
+      setBairros([...linhas, e.bairro].join("\n"));
+    }
+    setCidade(e.cidade);
+  }
+
+  function removerDoHistorico(e: EntradaHistorico) {
+    const chave = chaveBairro(e);
+    atualizarHistorico((lista) => lista.filter((x) => chaveBairro(x) !== chave));
   }
 
   async function exportar(formato: "xlsx" | "csv") {
@@ -195,6 +311,49 @@ export default function Home() {
       setExportando(null);
     }
   }
+
+  const coberturas = useMemo<Cobertura[]>(
+    () =>
+      historico.flatMap((e) =>
+        e.geo
+          ? [
+              {
+                id: chaveBairro(e),
+                rotulo: `${e.bairro} · ${e.total} leads · ${rotuloIdade(idadeDias(e.data))}`,
+                cor: COR_FAIXA[faixaIdade(idadeDias(e.data))],
+                geo: e.geo,
+              },
+            ]
+          : []
+      ),
+    [historico]
+  );
+
+  // Respeita os filtros da aba Leads
+  const pins = useMemo<Pin[]>(
+    () =>
+      filtrados.flatMap((l) => {
+        const c = coords[l.id];
+        if (!c) return [];
+        return [
+          {
+            id: l.id,
+            lat: c.lat,
+            lng: c.lng,
+            aproximado: c.aproximado,
+            cor: COR_PIN[qualidadeLead(l)],
+            nome: l.nome,
+            telefone: l.telefone,
+            email: l.email,
+            responsavel: l.responsavel,
+          },
+        ];
+      }),
+    [filtrados, coords]
+  );
+
+  const geocodificados = Object.keys(coords).length;
+  const naoEncontrados = Object.values(coords).filter((c) => c === null).length;
 
   const input =
     "w-full rounded-lg border border-gray-800 bg-gray-900 px-3 py-2.5 text-sm text-gray-100 placeholder:text-gray-500 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500";
@@ -253,6 +412,43 @@ export default function Home() {
           </button>
         </form>
 
+        {historico.length > 0 && (
+          <section className="mb-6">
+            <h2 className="mb-2 flex items-center gap-1.5 text-xs font-medium tracking-wide text-gray-400 uppercase">
+              <Clock className="h-3.5 w-3.5" />
+              Bairros já buscados
+            </h2>
+            <div className="flex flex-wrap gap-2">
+              {historico.map((e) => {
+                const dias = idadeDias(e.data);
+                return (
+                  <span
+                    key={chaveBairro(e)}
+                    className={`inline-flex items-center rounded-full text-xs ring-1 transition-colors ${CLASSE_FAIXA[faixaIdade(dias)]}`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => usarBairroDoHistorico(e)}
+                      title={`Adicionar ${e.bairro} (${e.cidade}) à busca`}
+                      className="py-1 pl-3"
+                    >
+                      {e.bairro} · {e.total} leads · {rotuloIdade(dias)}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => removerDoHistorico(e)}
+                      aria-label={`Remover ${e.bairro} do histórico`}
+                      className="ml-1 rounded-full p-1 pr-2 opacity-60 hover:opacity-100"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </span>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
         {progresso && (
           <div className="mb-4 flex items-center gap-2 rounded-lg border border-blue-500/30 bg-blue-500/10 px-4 py-3 text-sm text-blue-300">
             <LoaderCircle className="h-4 w-4 animate-spin" />
@@ -267,6 +463,56 @@ export default function Home() {
         {aviso && (
           <div className="mb-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm whitespace-pre-line text-amber-300">
             {aviso}
+          </div>
+        )}
+
+        {(leads.length > 0 || historico.length > 0) && (
+          <div className="mb-4 flex flex-wrap items-center gap-3 border-b border-gray-800">
+            {(
+              [
+                ["leads", "Leads", LayoutGrid],
+                ["mapa", "Mapa", MapIcon],
+              ] as const
+            ).map(([valor, label, Icone]) => (
+              <button
+                key={valor}
+                type="button"
+                onClick={() => setAba(valor)}
+                aria-pressed={aba === valor}
+                className={`-mb-px flex items-center gap-2 border-b-2 px-3 py-2 text-sm font-medium transition-colors ${
+                  aba === valor
+                    ? "border-blue-500 text-blue-400"
+                    : "border-transparent text-gray-400 hover:text-gray-200"
+                }`}
+              >
+                <Icone className="h-4 w-4" />
+                {label}
+                {valor === "leads" && leads.length > 0 && (
+                  <span className="rounded-full bg-gray-800 px-1.5 text-xs text-gray-300">{leads.length}</span>
+                )}
+              </button>
+            ))}
+            <div className="ml-auto flex items-center gap-3 pb-2 text-sm">
+              {geoProgresso ? (
+                <span className="flex items-center gap-2 text-blue-300">
+                  <LoaderCircle className="h-4 w-4 animate-spin" />
+                  Geocodificando... {geoProgresso.feitos}/{geoProgresso.total}
+                </span>
+              ) : (
+                leads.length > 0 &&
+                !carregando &&
+                geocodificados < leads.length && (
+                  <button
+                    type="button"
+                    onClick={mostrarNoMapa}
+                    className="flex items-center gap-2 rounded-lg border border-gray-700 bg-gray-800 px-3 py-1.5 font-medium hover:bg-gray-700"
+                  >
+                    <MapPin className="h-4 w-4" />
+                    {geocodificados > 0 ? "Continuar geocodificação" : "Mostrar no mapa"}
+                  </button>
+                )
+              )}
+            </div>
           </div>
         )}
 
@@ -359,13 +605,52 @@ export default function Home() {
           </div>
         )}
 
-        {buscou && !carregando && !erro && leads.length === 0 && (
+        {aba === "mapa" && (
+          <section className="space-y-3">
+            {geoAviso && (
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-300">
+                {geoAviso}
+              </div>
+            )}
+            <MapComponent coberturas={coberturas} pins={pins} enquadrarEm={enquadrarEm} />
+            <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-gray-400">
+              <span className="font-medium text-gray-300">Bairros:</span>
+              {(["recente", "medio", "antigo"] as const).map((f) => (
+                <span key={f} className="flex items-center gap-1.5">
+                  <span className="h-3 w-3 rounded-sm" style={{ background: COR_FAIXA[f] }} />
+                  {{ recente: "< 7 dias", medio: "7–30 dias", antigo: "> 30 dias" }[f]}
+                </span>
+              ))}
+              <span className="ml-2 font-medium text-gray-300">Leads:</span>
+              {(
+                [
+                  [3, "⭐⭐⭐"],
+                  [2, "⭐⭐"],
+                  [1, "⭐ / sem estrela"],
+                ] as const
+              ).map(([q, label]) => (
+                <span key={q} className="flex items-center gap-1.5">
+                  <span className="h-3 w-3 rounded-full" style={{ background: COR_PIN[q] }} />
+                  {label}
+                </span>
+              ))}
+              {geocodificados > 0 && (
+                <span className="ml-auto">
+                  {pins.length} no mapa
+                  {naoEncontrados > 0 && ` · ${naoEncontrados} endereços não encontrados`}
+                </span>
+              )}
+            </div>
+          </section>
+        )}
+
+        {aba === "leads" && buscou && !carregando && !erro && leads.length === 0 && (
           <p className="py-16 text-center text-gray-500">
             Nenhuma empresa encontrada. Confira a grafia do bairro e da cidade.
           </p>
         )}
 
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3" hidden={aba !== "leads"}>
           {filtrados.map((l) => (
             <article
               key={l.id}
