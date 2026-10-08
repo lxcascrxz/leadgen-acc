@@ -1,13 +1,17 @@
 import type { Lead } from "@/lib/types";
 
-export const maxDuration = 60;
+// Até 2 consultas (área e raio) × 3 tentativas de 20s + esperas
+export const maxDuration = 150;
 
-// Servidores públicos tentados em ordem; o principal costuma ficar sobrecarregado
+// Servidores públicos usados em rodízio; o principal costuma ficar sobrecarregado
 const OVERPASS_URLS = [
   "https://overpass-api.de/api/interpreter",
   "https://overpass.kumi.systems/api/interpreter",
   "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 ];
+const OVERPASS_TENTATIVAS = 3;
+const OVERPASS_ESPERA_MS = 2_000;
+const OVERPASS_TIMEOUT_MS = 20_000;
 const CNPJ_URL = "https://receitaws.com.br/v1/cnpj";
 const CNPJ_TIMEOUT_MS = 4_000;
 const USER_AGENT = "ACC-Telecom-LeadGen/0.1";
@@ -43,9 +47,15 @@ function normalizarNome(s: string) {
     .join(" ");
 }
 
+const esperar = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Tentativa 1 → servidor A, 2 → B, 3 → C, com espera entre elas; só desiste se todas falharem
 async function overpass(query: string): Promise<OsmElement[]> {
-  let ultimoErro = "";
-  for (const url of OVERPASS_URLS) {
+  const erros: string[] = [];
+  for (let tentativa = 0; tentativa < OVERPASS_TENTATIVAS; tentativa++) {
+    if (tentativa > 0) await esperar(OVERPASS_ESPERA_MS);
+    const url = OVERPASS_URLS[tentativa % OVERPASS_URLS.length];
+    const host = new URL(url).host;
     try {
       const res = await fetch(url, {
         method: "POST",
@@ -57,23 +67,24 @@ async function overpass(query: string): Promise<OsmElement[]> {
         },
         body: "data=" + encodeURIComponent(query),
         cache: "no-store",
-        signal: AbortSignal.timeout(25_000),
+        signal: AbortSignal.timeout(OVERPASS_TIMEOUT_MS),
       });
       if (!res.ok) {
-        ultimoErro = `${new URL(url).host} respondeu ${res.status}`;
+        erros.push(`${host} respondeu ${res.status}`);
         continue;
       }
       const json = (await res.json()) as { elements?: OsmElement[]; remark?: string };
+      // Timeout interno da Overpass vem como 200 com "remark" de erro
       if (json.remark?.includes("error")) {
-        ultimoErro = `${new URL(url).host}: ${json.remark}`;
+        erros.push(`${host}: ${json.remark}`);
         continue;
       }
       return json.elements ?? [];
     } catch (e) {
-      ultimoErro = `${new URL(url).host}: ${e instanceof Error ? e.message : e}`;
+      erros.push(`${host}: ${e instanceof Error ? e.message : e}`);
     }
   }
-  throw new Error(ultimoErro || "nenhum servidor Overpass disponível");
+  throw new Error(`${OVERPASS_TENTATIVAS} tentativas falharam (${erros.join("; ")})`);
 }
 
 const filtrosEmpresa = (area: string) =>
