@@ -420,7 +420,9 @@ export default function Home() {
     return { ...info, chave, total, restante };
   });
   const bairrosComMais = resumoBairros.filter((b) => b.restante > 0);
-  // Cada empresa nova consome 1 crédito: a próxima página custa no máximo isto
+  // No modo completo cada empresa retornada consome 1 crédito: a próxima página custa o limite de cada
+  // bairro com páginas restantes — menos na última página, em que a API só devolve o que sobrou.
+  // É aproximado porque empresas já vistas antes pela conta não são cobradas de novo.
   const creditosProximaPagina = bairrosComMais.reduce((s, b) => s + Math.min(b.limite, b.restante), 0);
 
   const geocodificados = Object.keys(coords).length;
@@ -545,6 +547,9 @@ export default function Home() {
                   <span className="font-medium text-white">{b.bairro}</span>
                   {": "}
                   {formatarNumero(b.carregados)} carregados · {formatarNumero(b.total)} na base
+                  {b.restante > 0 && (
+                    <span className="text-blue-300/80"> · ~{formatarNumero(b.restante)} créditos para buscar tudo</span>
+                  )}
                   {b.restante === 0 && b.total > 0 && <span className="text-emerald-300"> · completo</span>}
                 </li>
               ))}
@@ -561,7 +566,7 @@ export default function Home() {
                   {carregando ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
                   Carregar mais
                   <span className="text-xs font-normal text-blue-200">
-                    (até {formatarNumero(creditosProximaPagina)} créditos)
+                    (~{formatarNumero(creditosProximaPagina)} créditos)
                   </span>
                 </button>
               )}
