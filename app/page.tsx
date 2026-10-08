@@ -139,6 +139,7 @@ export default function Home() {
   const [leads, setLeads] = useState<Lead[]>([]);
   const [carregando, setCarregando] = useState(false);
   const [exportando, setExportando] = useState<"xlsx" | "csv" | null>(null);
+  const [enviandoSDR, setEnviandoSDR] = useState<Record<string, "enviando" | "enviado" | "erro">>({});
   const [erro, setErro] = useState("");
   const [aviso, setAviso] = useState("");
   const [buscou, setBuscou] = useState(false);
@@ -427,6 +428,32 @@ export default function Home() {
 
   const geocodificados = Object.keys(coords).length;
   const naoEncontrados = Object.values(coords).filter((c) => c === null).length;
+
+  async function enviarParaSDR(l: Lead) {
+    const id = l.id;
+    setEnviandoSDR((prev) => ({ ...prev, [id]: "enviando" }));
+    try {
+      const res = await fetch("https://acc-sdr.vercel.app/api/importar", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          nome: l.nome,
+          telefone: l.telefone,
+          email: l.email,
+          tipo: l.tipo,
+          endereco: l.endereco,
+          cnpj: l.cnpj,
+          responsavel: l.responsavel,
+          website: l.website,
+          bairro: l.bairroBuscado,
+        }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setEnviandoSDR((prev) => ({ ...prev, [id]: "enviado" }));
+    } catch {
+      setEnviandoSDR((prev) => ({ ...prev, [id]: "erro" }));
+    }
+  }
 
   const input =
     "w-full rounded-lg border border-gray-800 bg-gray-900 px-3 py-2.5 text-sm text-gray-100 placeholder:text-gray-500 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500";
@@ -865,6 +892,30 @@ export default function Home() {
                   )}
                 </ul>
               )}
+              <button
+                type="button"
+                disabled={enviandoSDR[l.id] === "enviando" || enviandoSDR[l.id] === "enviado"}
+                onClick={() => enviarParaSDR(l)}
+                className={`mt-auto flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
+                  enviandoSDR[l.id] === "enviado"
+                    ? "bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-500/30 cursor-default"
+                    : enviandoSDR[l.id] === "erro"
+                    ? "bg-red-500/20 text-red-300 ring-1 ring-red-500/30 hover:bg-red-500/30"
+                    : enviandoSDR[l.id] === "enviando"
+                    ? "bg-blue-500/20 text-blue-300 ring-1 ring-blue-500/30 cursor-wait"
+                    : "bg-blue-500/10 text-blue-300 ring-1 ring-blue-500/20 hover:bg-blue-500/20"
+                }`}
+              >
+                {enviandoSDR[l.id] === "enviando" ? (
+                  <><LoaderCircle className="h-4 w-4 animate-spin" /> Enviando...</>
+                ) : enviandoSDR[l.id] === "enviado" ? (
+                  <>✓ Enviado para Sofia</>
+                ) : enviandoSDR[l.id] === "erro" ? (
+                  <>⚠ Erro — tentar de novo</>
+                ) : (
+                  <>Enviar para SDR</>
+                )}
+              </button>
             </article>
           ))}
         </div>
