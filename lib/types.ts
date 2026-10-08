@@ -8,6 +8,8 @@ export type Lead = {
   website: string;
   lat: number | null;
   lng: number | null;
+  bairroBuscado: string;
+  dataBusca: string; // DD/MM/AAAA
   cnpj?: string;
   razaoSocial?: string;
   fantasia?: string;

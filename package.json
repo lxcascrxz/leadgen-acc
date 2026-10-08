@@ -13,7 +13,7 @@
     "next": "16.4.0",
     "react": "19.3.0",
     "react-dom": "19.3.0",
-    "xlsx": "^0.18.5"
+    "xlsx-js-style": "^1.2.0"
   },
   "devDependencies": {
     "@tailwindcss/turbopack": "^4",

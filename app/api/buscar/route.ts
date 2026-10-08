@@ -117,13 +117,15 @@ function apenasDigitos(s?: string) {
   return (s ?? "").replace(/\D/g, "");
 }
 
-function toLead(el: OsmElement): Lead {
+function toLead(el: OsmElement, bairroBuscado: string, dataBusca: string): Lead {
   const t = el.tags ?? {};
   const tipoKey = TIPO_KEYS.find((k) => t[k]);
   const cnpj = apenasDigitos(t["ref:vatin"] || t["ref:CNPJ"] || t["cnpj"] || t["ref:cnpj"]);
   return {
     id: `${el.type}/${el.id}`,
     nome: t.name,
+    bairroBuscado,
+    dataBusca,
     tipo: tipoKey ? t[tipoKey].replace(/_/g, " ") : "outro",
     endereco: montarEndereco(t),
     telefone: t.phone || t["contact:phone"] || t["contact:mobile"] || t["contact:whatsapp"] || "",
@@ -182,13 +184,14 @@ export async function GET(request: Request) {
   }
 
   try {
+    const dataBusca = new Date().toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo" });
     let elementos = await overpass(queryPorArea(bairro, cidade));
     if (elementos.length === 0) elementos = await overpass(queryPorRaio(bairro, cidade));
 
     const vistos = new Set<string>();
     let leads = elementos
       .filter((el) => el.tags?.name)
-      .map(toLead)
+      .map((el) => toLead(el, bairro, dataBusca))
       .filter((l) => {
         const chave = l.nome.toLowerCase() + "|" + l.endereco.toLowerCase();
         if (vistos.has(chave)) return false;
