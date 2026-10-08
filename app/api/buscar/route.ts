@@ -101,6 +101,9 @@ export async function GET(request: Request) {
     Math.max(Math.floor(Number(searchParams.get("limite")) || LIMITE_PADRAO), LIMITE_MIN),
     LIMITE_MAX
   );
+  // A Casa dos Dados pagina em blocos do tamanho do limite: página 2 com limite 100 = empresas 101–200.
+  // A ordem é estável, então continuar com o mesmo limite não repete nem pula empresas.
+  const pagina = Math.max(parseInt(searchParams.get("pagina") || "1", 10) || 1, 1);
 
   if (!bairro || !cidade) {
     return Response.json({ error: "Informe bairro e cidade." }, { status: 400 });
@@ -126,7 +129,7 @@ export async function GET(request: Request) {
         municipio: [semAcento(cidade)],
         situacao_cadastral: ["ATIVA"],
         limite,
-        pagina: 1,
+        pagina,
       }),
       cache: "no-store",
       signal: AbortSignal.timeout(TIMEOUT_MS),
@@ -151,13 +154,9 @@ export async function GET(request: Request) {
     const data = (await res.json()) as { total?: number; cnpjs?: CasaDosDadosEmpresa[] };
     const dataBusca = new Date().toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo" });
     const leads = (data.cnpjs ?? []).map((e) => toLead(e, bairro, dataBusca));
-    const total = data.total ?? leads.length;
-    const aviso =
-      total > leads.length
-        ? `${total.toLocaleString("pt-BR")} empresas ativas encontradas; mostrando as ${leads.length} primeiras.`
-        : undefined;
+    const totalEncontrados = data.total ?? leads.length;
 
-    return Response.json({ total: leads.length, totalDisponivel: total, leads, aviso });
+    return Response.json({ total: leads.length, totalEncontrados, paginaAtual: pagina, leads });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Erro desconhecido";
     return Response.json({ error: `Falha ao consultar a Casa dos Dados: ${msg}` }, { status: 502 });

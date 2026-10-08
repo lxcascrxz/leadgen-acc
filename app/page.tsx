@@ -18,6 +18,8 @@ import {
   MapPin,
   MapPinned,
   Phone,
+  Plus,
+  RotateCcw,
   Search,
   Star,
   User,
@@ -100,6 +102,17 @@ function ajustarLimite(v: string) {
   return Math.min(Math.max(Math.round(Number(v)) || LIMITE_PADRAO, LIMITE_MIN), LIMITE_MAX);
 }
 
+type InfoBairro = {
+  bairro: string;
+  cidade: string;
+  limite: number; // limite da 1ª página, mantido nas seguintes
+  carregados: number; // leads novos (sem duplicatas) somados de todas as páginas
+};
+
+const chaveLead = (l: Lead) => `${l.nome.toLowerCase()}|${l.endereco.toLowerCase()}`;
+
+const formatarNumero = (n: number) => n.toLocaleString("pt-BR");
+
 function truncar(s: string, max: number) {
   return s.length > max ? s.slice(0, max - 1).trimEnd() + "…" : s;
 }
@@ -129,6 +142,10 @@ export default function Home() {
   const [erro, setErro] = useState("");
   const [aviso, setAviso] = useState("");
   const [buscou, setBuscou] = useState(false);
+  // Por bairro (chave bairro|cidade): última página carregada e total de empresas na base
+  const [paginaAtual, setPaginaAtual] = useState<Record<string, number>>({});
+  const [totalEncontrados, setTotalEncontrados] = useState<Record<string, number>>({});
+  const [infoBairro, setInfoBairro] = useState<Record<string, InfoBairro>>({});
   const [filtroTexto, setFiltroTexto] = useState("");
   const [filtroTipo, setFiltroTipo] = useState("");
   const [filtroTelefone, setFiltroTelefone] = useState<FiltroTelefone>("todos");
@@ -180,7 +197,70 @@ export default function Home() {
     });
   }, [leads, filtroTexto, filtroTipo, filtroTelefone]);
 
-  async function buscar(e: React.FormEvent) {
+  // Busca cada bairro em sequência. Bairro novo começa na página 1; bairro já buscado nesta sessão
+  // continua da próxima página com o mesmo limite, e os leads são somados aos que já estão na tela.
+  async function buscarBairros(alvos: { bairro: string; cidade: string }[], limiteNovo: number) {
+    setCarregando(true);
+    setErro("");
+    setAviso("");
+
+    // Duplicatas: mesmo CNPJ ou mesmo nome + endereço
+    const vistos = new Set(leads.flatMap((l) => [l.id, chaveLead(l)]));
+    const erros: string[] = [];
+    const avisos: string[] = [];
+    for (const [i, { bairro, cidade }] of alvos.entries()) {
+      const chave = chaveBairro({ bairro, cidade });
+      const anterior = infoBairro[chave];
+      const pagina = (paginaAtual[chave] ?? 0) + 1;
+      // Mudar o limite no meio desalinharia as páginas (pularia ou repetiria empresas)
+      const limiteBairro = anterior?.limite ?? limiteNovo;
+      const total = totalEncontrados[chave];
+      if (total !== undefined && (pagina - 1) * limiteBairro >= total) {
+        avisos.push(`${bairro}: todas as ${formatarNumero(total)} empresas da base já foram carregadas.`);
+        continue;
+      }
+
+      setProgresso(`Buscando ${bairro} (página ${pagina})... ${i + 1}/${alvos.length}`);
+      try {
+        const params = new URLSearchParams({
+          bairro,
+          cidade,
+          limite: String(limiteBairro),
+          pagina: String(pagina),
+        });
+        const res = await fetch(`/api/buscar?${params}`);
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error ?? "Erro na busca");
+        if (data.leads.length === 0 && pagina === 1) avisos.push(`${bairro}: nenhuma empresa encontrada.`);
+
+        const novos = (data.leads as Lead[]).filter((l) => {
+          if (vistos.has(l.id) || vistos.has(chaveLead(l))) return false;
+          vistos.add(l.id);
+          vistos.add(chaveLead(l));
+          return true;
+        });
+        const carregados = (anterior?.carregados ?? 0) + novos.length;
+        setLeads((atuais) => [...atuais, ...novos]);
+        setPaginaAtual((p) => ({ ...p, [chave]: data.paginaAtual }));
+        setTotalEncontrados((t) => ({ ...t, [chave]: data.totalEncontrados }));
+        setInfoBairro((info) => ({ ...info, [chave]: { bairro, cidade, limite: limiteBairro, carregados } }));
+        if (carregados > 0) {
+          const entrada = { bairro, cidade, data: hojeISO(), total: carregados };
+          atualizarHistorico((lista) => registrarBusca(lista, entrada));
+        }
+      } catch (err) {
+        erros.push(`${bairro}: ${err instanceof Error ? err.message : "Erro na busca"}`);
+      }
+    }
+
+    setErro(erros.join("\n"));
+    setAviso(avisos.join("\n"));
+    setProgresso("");
+    setCarregando(false);
+    setBuscou(true);
+  }
+
+  function buscar(e: React.FormEvent) {
     e.preventDefault();
     const lista = Array.from(
       new Map(
@@ -194,53 +274,35 @@ export default function Home() {
     if (!lista.length || !cidade.trim()) return;
     const limiteValido = ajustarLimite(limite);
     setLimite(String(limiteValido));
-    setCarregando(true);
-    setErro("");
-    setAviso("");
-    setLeads([]);
-    setFiltroTexto("");
-    setFiltroTipo("");
-    setFiltroTelefone("todos");
+    buscarBairros(
+      lista.map((bairro) => ({ bairro, cidade: cidade.trim() })),
+      limiteValido
+    );
+  }
+
+  // Próxima página de todos os bairros que ainda têm empresas na base
+  function carregarMais() {
+    buscarBairros(
+      bairrosComMais.map(({ bairro, cidade }) => ({ bairro, cidade })),
+      ajustarLimite(limite)
+    );
+  }
+
+  function limparResultados() {
     geoExecucao.current++;
+    setLeads([]);
+    setPaginaAtual({});
+    setTotalEncontrados({});
+    setInfoBairro({});
     setCoords({});
     setGeoProgresso(null);
     setGeoAviso("");
-
-    // Busca um bairro por vez para mostrar o progresso
-    // e junta tudo, removendo duplicatas por nome + endereço
-    const vistos = new Set<string>();
-    const erros: string[] = [];
-    const avisos: string[] = [];
-    for (const [i, bairro] of lista.entries()) {
-      setProgresso(`Buscando ${bairro}... ${i + 1}/${lista.length}`);
-      try {
-        const params = new URLSearchParams({ bairro, cidade, limite: String(limiteValido) });
-        const res = await fetch(`/api/buscar?${params}`);
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error ?? "Erro na busca");
-        if (data.aviso) avisos.push(`${bairro}: ${data.aviso}`);
-        if (data.leads.length === 0) avisos.push(`${bairro}: nenhuma empresa encontrada.`);
-        const novos = (data.leads as Lead[]).filter((l) => {
-          const chave = `${l.nome.toLowerCase()}|${l.endereco.toLowerCase()}`;
-          if (vistos.has(chave)) return false;
-          vistos.add(chave);
-          return true;
-        });
-        setLeads((atuais) => [...atuais, ...novos]);
-        if (data.leads.length > 0) {
-          const entrada = { bairro, cidade: cidade.trim(), data: hojeISO(), total: data.leads.length };
-          atualizarHistorico((lista) => registrarBusca(lista, entrada));
-        }
-      } catch (err) {
-        erros.push(`${bairro}: ${err instanceof Error ? err.message : "Erro na busca"}`);
-      }
-    }
-
-    setErro(erros.join("\n"));
-    setAviso(avisos.join("\n"));
-    setProgresso("");
-    setCarregando(false);
-    setBuscou(true);
+    setErro("");
+    setAviso("");
+    setFiltroTexto("");
+    setFiltroTipo("");
+    setFiltroTelefone("todos");
+    setBuscou(false);
   }
 
   // Geocodifica um endereço por vez (a fila em lib/nominatim garante 1 req/s); endereços em cache são instantâneos
@@ -351,6 +413,15 @@ export default function Home() {
       }),
     [filtrados, coords]
   );
+
+  const resumoBairros = Object.entries(infoBairro).map(([chave, info]) => {
+    const total = totalEncontrados[chave] ?? 0;
+    const restante = Math.max(total - (paginaAtual[chave] ?? 0) * info.limite, 0);
+    return { ...info, chave, total, restante };
+  });
+  const bairrosComMais = resumoBairros.filter((b) => b.restante > 0);
+  // Cada empresa nova consome 1 crédito: a próxima página custa no máximo isto
+  const creditosProximaPagina = bairrosComMais.reduce((s, b) => s + Math.min(b.limite, b.restante), 0);
 
   const geocodificados = Object.keys(coords).length;
   const naoEncontrados = Object.values(coords).filter((c) => c === null).length;
@@ -463,6 +534,47 @@ export default function Home() {
         {aviso && (
           <div className="mb-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm whitespace-pre-line text-amber-300">
             {aviso}
+          </div>
+        )}
+
+        {resumoBairros.length > 0 && (
+          <div className="mb-4 flex flex-wrap items-center gap-x-6 gap-y-3 rounded-lg border border-blue-500/30 bg-blue-500/10 px-4 py-3 text-sm">
+            <ul className="space-y-0.5 text-blue-200">
+              {resumoBairros.map((b) => (
+                <li key={b.chave}>
+                  <span className="font-medium text-white">{b.bairro}</span>
+                  {": "}
+                  {formatarNumero(b.carregados)} carregados · {formatarNumero(b.total)} na base
+                  {b.restante === 0 && b.total > 0 && <span className="text-emerald-300"> · completo</span>}
+                </li>
+              ))}
+            </ul>
+            <div className="ml-auto flex flex-wrap items-center gap-2">
+              {bairrosComMais.length > 0 && (
+                <button
+                  type="button"
+                  onClick={carregarMais}
+                  disabled={carregando}
+                  title="Busca a próxima página de cada bairro que ainda tem empresas na base"
+                  className="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 font-medium hover:bg-blue-500 disabled:opacity-60"
+                >
+                  {carregando ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+                  Carregar mais
+                  <span className="text-xs font-normal text-blue-200">
+                    (até {formatarNumero(creditosProximaPagina)} créditos)
+                  </span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={limparResultados}
+                disabled={carregando}
+                className="flex items-center gap-2 rounded-lg border border-gray-700 bg-gray-800 px-4 py-2 font-medium hover:bg-gray-700 disabled:opacity-60"
+              >
+                <RotateCcw className="h-4 w-4" />
+                Limpar resultados
+              </button>
+            </div>
           </div>
         )}
 
