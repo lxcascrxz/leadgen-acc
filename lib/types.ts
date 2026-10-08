@@ -10,6 +10,7 @@ export type Lead = {
   lng: number | null;
   cnpj?: string;
   razaoSocial?: string;
+  fantasia?: string;
   situacao?: string;
   dataAbertura?: string;
   responsavel?: string;

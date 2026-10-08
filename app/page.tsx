@@ -18,6 +18,14 @@ import {
 } from "lucide-react";
 import type { Lead } from "@/lib/types";
 
+type FiltroTelefone = "todos" | "com" | "sem";
+
+const OPCOES_TELEFONE: [FiltroTelefone, string][] = [
+  ["todos", "Todos"],
+  ["com", "Com telefone"],
+  ["sem", "Sem telefone"],
+];
+
 function corSituacao(situacao?: string) {
   switch (situacao?.toLowerCase()) {
     case "ativa":
@@ -54,6 +62,7 @@ export default function Home() {
   const [buscou, setBuscou] = useState(false);
   const [filtroTexto, setFiltroTexto] = useState("");
   const [filtroTipo, setFiltroTipo] = useState("");
+  const [filtroTelefone, setFiltroTelefone] = useState<FiltroTelefone>("todos");
 
   const tipos = useMemo(
     () => Array.from(new Set(leads.map((l) => l.tipo))).sort((a, b) => a.localeCompare(b)),
@@ -64,12 +73,14 @@ export default function Home() {
     const q = filtroTexto.trim().toLowerCase();
     return leads.filter((l) => {
       if (filtroTipo && l.tipo !== filtroTipo) return false;
+      if (filtroTelefone === "com" && !l.telefone) return false;
+      if (filtroTelefone === "sem" && l.telefone) return false;
       if (!q) return true;
       return [l.nome, l.endereco, l.telefone, l.email, l.website, l.cnpj, l.razaoSocial, l.responsavel]
         .filter(Boolean)
         .some((v) => v!.toLowerCase().includes(q));
     });
-  }, [leads, filtroTexto, filtroTipo]);
+  }, [leads, filtroTexto, filtroTipo, filtroTelefone]);
 
   async function buscar(e: React.FormEvent) {
     e.preventDefault();
@@ -79,6 +90,7 @@ export default function Home() {
     setAviso("");
     setFiltroTexto("");
     setFiltroTipo("");
+    setFiltroTelefone("todos");
     try {
       const params = new URLSearchParams({ bairro, cidade, enriquecer: String(enriquecer) });
       const res = await fetch(`/api/buscar?${params}`);
@@ -248,6 +260,24 @@ export default function Home() {
                 CSV
               </button>
             </div>
+            <div className="flex w-full flex-wrap gap-2">
+              {OPCOES_TELEFONE.map(([valor, label]) => (
+                <button
+                  key={valor}
+                  type="button"
+                  onClick={() => setFiltroTelefone(valor)}
+                  aria-pressed={filtroTelefone === valor}
+                  className={`flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-medium ring-1 transition-colors ${
+                    filtroTelefone === valor
+                      ? "bg-blue-600 text-white ring-blue-600"
+                      : "bg-gray-900 text-gray-300 ring-gray-700 hover:bg-gray-800"
+                  }`}
+                >
+                  {valor !== "todos" && <Phone className="h-3 w-3" />}
+                  {label}
+                </button>
+              ))}
+            </div>
           </div>
         )}
 
@@ -341,6 +371,7 @@ export default function Home() {
                       <span>
                         {formatarCnpj(l.cnpj)}
                         {l.razaoSocial && <span className="block text-xs text-gray-500">{l.razaoSocial}</span>}
+                        {l.fantasia && <span className="block text-xs text-gray-500">{l.fantasia}</span>}
                       </span>
                     </li>
                   )}

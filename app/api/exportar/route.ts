@@ -11,10 +11,7 @@ const COLUNAS: [keyof Lead, string][] = [
   ["cnpj", "CNPJ"],
   ["razaoSocial", "Razão Social"],
   ["situacao", "Situação"],
-  ["dataAbertura", "Data de Abertura"],
   ["responsavel", "Responsável"],
-  ["lat", "Latitude"],
-  ["lng", "Longitude"],
 ];
 
 export async function POST(request: Request) {

@@ -8,7 +8,8 @@ const OVERPASS_URLS = [
   "https://overpass.kumi.systems/api/interpreter",
   "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 ];
-const CNPJ_URL = "https://publica.cnpj.ws/cnpj";
+const CNPJ_URL = "https://receitaws.com.br/v1/cnpj";
+const CNPJ_TIMEOUT_MS = 4_000;
 const USER_AGENT = "ACC-Telecom-LeadGen/0.1";
 const MAX_RESULTS = 100;
 const MAX_ENRICH = 20;
@@ -134,36 +135,39 @@ function toLead(el: OsmElement): Lead {
   };
 }
 
-type CnpjWsResponse = {
-  razao_social?: string;
-  socios?: { nome?: string }[];
-  estabelecimento?: {
-    situacao_cadastral?: string;
-    data_inicio_atividade?: string;
-    email?: string;
-    ddd1?: string;
-    telefone1?: string;
-  };
+type ReceitaWsResponse = {
+  status?: string;
+  nome?: string;
+  fantasia?: string;
+  situacao?: string;
+  abertura?: string;
+  telefone?: string;
+  email?: string;
+  qsa?: { nome?: string }[];
 };
 
+// A ReceitaWS não tem busca por nome (/v1/company/search responde 404), só consulta por CNPJ
 async function enriquecer(lead: Lead): Promise<Lead | "rate-limit"> {
   if (!lead.cnpj) return lead;
   const res = await fetch(`${CNPJ_URL}/${lead.cnpj}`, {
     headers: { Accept: "application/json", "User-Agent": USER_AGENT },
     cache: "no-store",
+    signal: AbortSignal.timeout(CNPJ_TIMEOUT_MS),
   });
   if (res.status === 429) return "rate-limit";
   if (!res.ok) return lead;
-  const d = (await res.json()) as CnpjWsResponse;
-  const est = d.estabelecimento ?? {};
+  const d = (await res.json()) as ReceitaWsResponse;
+  if (d.status === "ERROR") return lead;
   return {
     ...lead,
-    razaoSocial: d.razao_social,
-    situacao: est.situacao_cadastral,
-    dataAbertura: est.data_inicio_atividade,
-    responsavel: d.socios?.[0]?.nome,
-    email: lead.email || est.email?.toLowerCase() || "",
-    telefone: lead.telefone || (est.telefone1 ? `(${est.ddd1}) ${est.telefone1}` : ""),
+    razaoSocial: d.nome,
+    fantasia: d.fantasia || undefined,
+    situacao: d.situacao,
+    dataAbertura: d.abertura,
+    responsavel: d.qsa?.[0]?.nome,
+    email: lead.email || d.email?.toLowerCase() || "",
+    // A ReceitaWS pode trazer mais de um telefone separados por "/"
+    telefone: lead.telefone || d.telefone?.split("/")[0].trim() || "",
   };
 }
 
@@ -197,11 +201,11 @@ export async function GET(request: Request) {
     if (enrich) {
       const comCnpj = leads.filter((l) => l.cnpj);
       let enriquecidos = 0;
-      // A API pública do cnpj.ws tem limite baixo de requisições: consulta em série e para no 429
+      // A API pública da ReceitaWS tem limite baixo de requisições: consulta em série e para no 429
       for (const lead of comCnpj.slice(0, MAX_ENRICH)) {
         const r = await enriquecer(lead).catch(() => lead);
         if (r === "rate-limit") {
-          avisoEnriquecimento = "Limite da API publica.cnpj.ws atingido; parte dos leads não foi enriquecida.";
+          avisoEnriquecimento = "Limite da API ReceitaWS atingido; parte dos leads não foi enriquecida.";
           break;
         }
         leads = leads.map((l) => (l.id === r.id ? r : l));
