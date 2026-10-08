@@ -1,241 +1,146 @@
 import type { Lead } from "@/lib/types";
 
-// Até 2 consultas (área e raio) × 3 tentativas de 20s + esperas
-export const maxDuration = 150;
+const PESQUISA_URL = "https://api.casadosdados.com.br/v5/cnpj/pesquisa?tipo_resultado=completo";
+const LIMITE_PADRAO = 100;
+const TIMEOUT_MS = 30_000;
 
-// Servidores públicos usados em rodízio; o principal costuma ficar sobrecarregado
-const OVERPASS_URLS = [
-  "https://overpass-api.de/api/interpreter",
-  "https://overpass.kumi.systems/api/interpreter",
-  "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
-];
-const OVERPASS_TENTATIVAS = 3;
-const OVERPASS_ESPERA_MS = 2_000;
-const OVERPASS_TIMEOUT_MS = 20_000;
-const CNPJ_URL = "https://receitaws.com.br/v1/cnpj";
-const CNPJ_TIMEOUT_MS = 4_000;
-const USER_AGENT = "ACC-Telecom-LeadGen/0.1";
-const MAX_RESULTS = 100;
-const MAX_ENRICH = 20;
-
-type OsmElement = {
-  type: string;
-  id: number;
-  lat?: number;
-  lon?: number;
-  center?: { lat: number; lon: number };
-  tags?: Record<string, string>;
+type CasaDosDadosEmpresa = {
+  cnpj: string;
+  razao_social?: string;
+  nome_fantasia?: string;
+  situacao_cadastral?: { situacao_atual?: string };
+  data_abertura?: string;
+  atividade_principal?: { descricao?: string };
+  endereco?: {
+    tipo_logradouro?: string;
+    logradouro?: string;
+    numero?: string;
+    complemento?: string;
+    bairro?: string;
+    municipio?: string;
+    uf?: string;
+    cep?: string;
+  };
+  quadro_societario?: { nome?: string }[];
+  contato_telefonico?: { completo?: string; ddd?: string; numero?: string }[];
+  contato_email?: { email?: string; valido?: boolean }[];
 };
 
-const TIPO_KEYS = ["shop", "amenity", "office", "craft", "tourism", "healthcare", "leisure"];
-
-// Busca por nome exato usa o índice da Overpass; regex case-insensitive estoura o timeout
-function escapeTag(s: string) {
-  return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-}
-
-const PARTICULAS = new Set(["de", "da", "do", "das", "dos", "e"]);
-
-// "são paulo" -> "São Paulo", "vila DA saude" -> "Vila da Saude"
-function normalizarNome(s: string) {
+// A Casa dos Dados não encontra nada com acento ("São Paulo" → 0 resultados, "sao paulo" → ok)
+function semAcento(s: string) {
   return s
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
     .trim()
     .replace(/\s+/g, " ")
-    .toLowerCase()
-    .split(" ")
-    .map((w, i) => (i > 0 && PARTICULAS.has(w) ? w : w.charAt(0).toUpperCase() + w.slice(1)))
-    .join(" ");
+    .toLowerCase();
 }
 
-const esperar = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-// Tentativa 1 → servidor A, 2 → B, 3 → C, com espera entre elas; só desiste se todas falharem
-async function overpass(query: string): Promise<OsmElement[]> {
-  const erros: string[] = [];
-  for (let tentativa = 0; tentativa < OVERPASS_TENTATIVAS; tentativa++) {
-    if (tentativa > 0) await esperar(OVERPASS_ESPERA_MS);
-    const url = OVERPASS_URLS[tentativa % OVERPASS_URLS.length];
-    const host = new URL(url).host;
-    try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-          Accept: "application/json",
-          // A Overpass recusa (406) requisições sem um User-Agent identificável
-          "User-Agent": USER_AGENT,
-        },
-        body: "data=" + encodeURIComponent(query),
-        cache: "no-store",
-        signal: AbortSignal.timeout(OVERPASS_TIMEOUT_MS),
-      });
-      if (!res.ok) {
-        erros.push(`${host} respondeu ${res.status}`);
-        continue;
-      }
-      const json = (await res.json()) as { elements?: OsmElement[]; remark?: string };
-      // Timeout interno da Overpass vem como 200 com "remark" de erro
-      if (json.remark?.includes("error")) {
-        erros.push(`${host}: ${json.remark}`);
-        continue;
-      }
-      return json.elements ?? [];
-    } catch (e) {
-      erros.push(`${host}: ${e instanceof Error ? e.message : e}`);
-    }
-  }
-  throw new Error(`${OVERPASS_TENTATIVAS} tentativas falharam (${erros.join("; ")})`);
+// "RUA CARLOS ESCOBAR" → "Rua Carlos Escobar"
+function capitalizar(s = "") {
+  return s.toLowerCase().replace(/(^|\s)\p{L}/gu, (c) => c.toUpperCase());
 }
 
-const filtrosEmpresa = (area: string) =>
-  TIPO_KEYS.map((k) => `nwr${area}["name"]["${k}"];`).join("\n");
-
-function queryPorArea(bairro: string, cidade: string) {
-  const b = escapeTag(bairro);
-  const c = escapeTag(cidade);
-  return `[out:json][timeout:25];
-area["boundary"="administrative"]["name"="${c}"]->.cidade;
-(
-  area(area.cidade)["name"="${b}"]["boundary"="administrative"];
-  area(area.cidade)["name"="${b}"]["place"];
-)->.bairro;
-(
-${filtrosEmpresa("(area.bairro)")}
-);
-out center tags ${MAX_RESULTS};`;
+// "2011-07-14T00:00:00Z" → "14/07/2011"
+function formatarData(iso?: string) {
+  const m = iso?.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m && m[1] !== "0001" ? `${m[3]}/${m[2]}/${m[1]}` : undefined;
 }
 
-// Muitos bairros no OSM são apenas um ponto (place=suburb/neighbourhood): busca num raio ao redor
-function queryPorRaio(bairro: string, cidade: string, raio = 1200) {
-  const b = escapeTag(bairro);
-  const c = escapeTag(cidade);
-  return `[out:json][timeout:25];
-area["boundary"="administrative"]["name"="${c}"]->.cidade;
-node(area.cidade)["place"~"suburb|neighbourhood|quarter|village"]["name"="${b}"]->.centro;
-(
-${filtrosEmpresa(`(around.centro:${raio})`)}
-);
-out center tags ${MAX_RESULTS};`;
+function formatarTelefone(t?: { completo?: string; ddd?: string; numero?: string }) {
+  if (!t) return "";
+  if (t.ddd && t.numero) return `(${t.ddd}) ${t.numero}`;
+  return t.completo ?? "";
 }
 
-function montarEndereco(t: Record<string, string>) {
-  if (t["addr:full"]) return t["addr:full"];
-  const rua = [t["addr:street"], t["addr:housenumber"]].filter(Boolean).join(", ");
-  return [rua, t["addr:suburb"], t["addr:city"], t["addr:postcode"]].filter(Boolean).join(" - ");
-}
+function toLead(e: CasaDosDadosEmpresa, bairroBuscado: string, dataBusca: string): Lead {
+  const end = e.endereco ?? {};
+  const rua = [end.tipo_logradouro, end.logradouro].filter(Boolean).join(" ");
+  const endereco = [
+    [capitalizar(rua), end.numero].filter(Boolean).join(", "),
+    capitalizar(end.bairro),
+    [capitalizar(end.municipio), end.uf].filter(Boolean).join("/"),
+  ]
+    .filter(Boolean)
+    .join(" - ");
+  const email = e.contato_email?.find((c) => c.valido !== false)?.email ?? e.contato_email?.[0]?.email ?? "";
+  const razaoSocial = e.razao_social ?? "";
 
-function apenasDigitos(s?: string) {
-  return (s ?? "").replace(/\D/g, "");
-}
-
-function toLead(el: OsmElement, bairroBuscado: string, dataBusca: string): Lead {
-  const t = el.tags ?? {};
-  const tipoKey = TIPO_KEYS.find((k) => t[k]);
-  const cnpj = apenasDigitos(t["ref:vatin"] || t["ref:CNPJ"] || t["cnpj"] || t["ref:cnpj"]);
   return {
-    id: `${el.type}/${el.id}`,
-    nome: t.name,
+    id: e.cnpj,
+    nome: e.nome_fantasia?.trim() || razaoSocial,
+    tipo: e.atividade_principal?.descricao ?? "",
+    endereco,
+    telefone: formatarTelefone(e.contato_telefonico?.[0]),
+    email: email.toLowerCase(),
+    website: "",
+    // A Casa dos Dados só traz o centro do município, que não serve para localizar a empresa
+    lat: 0,
+    lng: 0,
     bairroBuscado,
     dataBusca,
-    tipo: tipoKey ? t[tipoKey].replace(/_/g, " ") : "outro",
-    endereco: montarEndereco(t),
-    telefone: t.phone || t["contact:phone"] || t["contact:mobile"] || t["contact:whatsapp"] || "",
-    email: t.email || t["contact:email"] || "",
-    website: t.website || t["contact:website"] || t.url || "",
-    lat: el.lat ?? el.center?.lat ?? null,
-    lng: el.lon ?? el.center?.lon ?? null,
-    ...(cnpj.length === 14 ? { cnpj } : {}),
-  };
-}
-
-type ReceitaWsResponse = {
-  status?: string;
-  nome?: string;
-  fantasia?: string;
-  situacao?: string;
-  abertura?: string;
-  telefone?: string;
-  email?: string;
-  qsa?: { nome?: string }[];
-};
-
-// A ReceitaWS não tem busca por nome (/v1/company/search responde 404), só consulta por CNPJ
-async function enriquecer(lead: Lead): Promise<Lead | "rate-limit"> {
-  if (!lead.cnpj) return lead;
-  const res = await fetch(`${CNPJ_URL}/${lead.cnpj}`, {
-    headers: { Accept: "application/json", "User-Agent": USER_AGENT },
-    cache: "no-store",
-    signal: AbortSignal.timeout(CNPJ_TIMEOUT_MS),
-  });
-  if (res.status === 429) return "rate-limit";
-  if (!res.ok) return lead;
-  const d = (await res.json()) as ReceitaWsResponse;
-  if (d.status === "ERROR") return lead;
-  return {
-    ...lead,
-    razaoSocial: d.nome,
-    fantasia: d.fantasia || undefined,
-    situacao: d.situacao,
-    dataAbertura: d.abertura,
-    responsavel: d.qsa?.[0]?.nome,
-    email: lead.email || d.email?.toLowerCase() || "",
-    // A ReceitaWS pode trazer mais de um telefone separados por "/"
-    telefone: lead.telefone || d.telefone?.split("/")[0].trim() || "",
+    cnpj: e.cnpj,
+    razaoSocial,
+    situacao: e.situacao_cadastral?.situacao_atual,
+    dataAbertura: formatarData(e.data_abertura),
+    responsavel: e.quadro_societario?.[0]?.nome,
+    bairroCnpj: capitalizar(end.bairro),
+    fonte: "Casa dos Dados",
   };
 }
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
-  const bairro = normalizarNome(searchParams.get("bairro") ?? "");
-  const cidade = normalizarNome(searchParams.get("cidade") ?? "");
-  const enrich = searchParams.get("enriquecer") === "true";
+  const bairro = searchParams.get("bairro")?.trim() ?? "";
+  const cidade = searchParams.get("cidade")?.trim() ?? "";
+  // Cada empresa retornada consome 1 crédito da Casa dos Dados
+  const limite = Math.min(Math.max(Number(searchParams.get("limite")) || LIMITE_PADRAO, 1), LIMITE_PADRAO);
 
   if (!bairro || !cidade) {
     return Response.json({ error: "Informe bairro e cidade." }, { status: 400 });
   }
+  const apiKey = process.env.CASA_DOS_DADOS_KEY;
+  if (!apiKey) {
+    return Response.json({ error: "CASA_DOS_DADOS_KEY não configurada no .env.local." }, { status: 500 });
+  }
 
   try {
-    const dataBusca = new Date().toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo" });
-    let elementos = await overpass(queryPorArea(bairro, cidade));
-    if (elementos.length === 0) elementos = await overpass(queryPorRaio(bairro, cidade));
+    const res = await fetch(PESQUISA_URL, {
+      method: "POST",
+      headers: { "api-key": apiKey, "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({
+        bairro: [semAcento(bairro)],
+        municipio: [semAcento(cidade)],
+        situacao_cadastral: ["ATIVA"],
+        limite,
+        pagina: 1,
+      }),
+      cache: "no-store",
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
 
-    const vistos = new Set<string>();
-    let leads = elementos
-      .filter((el) => el.tags?.name)
-      .map((el) => toLead(el, bairro, dataBusca))
-      .filter((l) => {
-        const chave = l.nome.toLowerCase() + "|" + l.endereco.toLowerCase();
-        if (vistos.has(chave)) return false;
-        vistos.add(chave);
-        return true;
-      })
-      .slice(0, MAX_RESULTS);
-
-    let avisoEnriquecimento: string | undefined;
-    if (enrich) {
-      const comCnpj = leads.filter((l) => l.cnpj);
-      let enriquecidos = 0;
-      // A API pública da ReceitaWS tem limite baixo de requisições: consulta em série e para no 429
-      for (const lead of comCnpj.slice(0, MAX_ENRICH)) {
-        const r = await enriquecer(lead).catch(() => lead);
-        if (r === "rate-limit") {
-          avisoEnriquecimento = "Limite da API ReceitaWS atingido; parte dos leads não foi enriquecida.";
-          break;
-        }
-        leads = leads.map((l) => (l.id === r.id ? r : l));
-        enriquecidos++;
-      }
-      if (!avisoEnriquecimento) {
-        avisoEnriquecimento =
-          comCnpj.length === 0
-            ? "Nenhum resultado possui CNPJ cadastrado no OpenStreetMap para enriquecer."
-            : `${enriquecidos} de ${comCnpj.length} leads com CNPJ enriquecidos.`;
-      }
+    if (res.status === 401) {
+      return Response.json({ error: "Chave da Casa dos Dados inválida." }, { status: 502 });
+    }
+    if (res.status === 403) {
+      return Response.json({ error: "Sem saldo de créditos na Casa dos Dados." }, { status: 402 });
+    }
+    if (!res.ok) {
+      return Response.json({ error: `Casa dos Dados respondeu ${res.status}.` }, { status: 502 });
     }
 
-    return Response.json({ total: leads.length, leads, aviso: avisoEnriquecimento });
+    const data = (await res.json()) as { total?: number; cnpjs?: CasaDosDadosEmpresa[] };
+    const dataBusca = new Date().toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo" });
+    const leads = (data.cnpjs ?? []).map((e) => toLead(e, bairro, dataBusca));
+    const total = data.total ?? leads.length;
+    const aviso =
+      total > leads.length
+        ? `${total.toLocaleString("pt-BR")} empresas ativas encontradas; mostrando as ${leads.length} primeiras.`
+        : undefined;
+
+    return Response.json({ total: leads.length, totalDisponivel: total, leads, aviso });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Erro desconhecido";
-    return Response.json({ error: `Falha ao consultar o OpenStreetMap: ${msg}` }, { status: 502 });
+    return Response.json({ error: `Falha ao consultar a Casa dos Dados: ${msg}` }, { status: 502 });
   }
 }

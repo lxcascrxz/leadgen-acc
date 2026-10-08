@@ -16,4 +16,6 @@ export type Lead = {
   situacao?: string;
   dataAbertura?: string;
   responsavel?: string;
+  bairroCnpj?: string;
+  fonte?: string;
 };

@@ -72,7 +72,6 @@ export default function Home() {
   const [cidade, setCidade] = useState("");
   const [progresso, setProgresso] = useState("");
   const [vendedores, setVendedores] = useState(1);
-  const [enriquecer, setEnriquecer] = useState(false);
   const [leads, setLeads] = useState<Lead[]>([]);
   const [carregando, setCarregando] = useState(false);
   const [exportando, setExportando] = useState<"xlsx" | "csv" | null>(null);
@@ -122,7 +121,7 @@ export default function Home() {
     setFiltroTipo("");
     setFiltroTelefone("todos");
 
-    // Busca um bairro por vez (a Overpass não aguenta várias consultas pesadas em paralelo)
+    // Busca um bairro por vez para mostrar o progresso
     // e junta tudo, removendo duplicatas por nome + endereço
     const vistos = new Set<string>();
     const erros: string[] = [];
@@ -130,7 +129,7 @@ export default function Home() {
     for (const [i, bairro] of lista.entries()) {
       setProgresso(`Buscando ${bairro}... ${i + 1}/${lista.length}`);
       try {
-        const params = new URLSearchParams({ bairro, cidade, enriquecer: String(enriquecer) });
+        const params = new URLSearchParams({ bairro, cidade });
         const res = await fetch(`/api/buscar?${params}`);
         const data = await res.json();
         if (!res.ok) throw new Error(data.error ?? "Erro na busca");
@@ -192,13 +191,13 @@ export default function Home() {
             ACC Telecom <span className="text-blue-400">— Gerador de Leads</span>
           </h1>
           <p className="mt-1 text-sm text-gray-400">
-            Busque empresas por bairro no OpenStreetMap e enriqueça com dados de CNPJ.
+            Busque empresas ativas por bairro na base de CNPJs da Casa dos Dados.
           </p>
         </header>
 
         <form
           onSubmit={buscar}
-          className="mb-6 grid gap-3 rounded-xl border border-gray-800 bg-gray-900/50 p-4 sm:grid-cols-[1fr_1fr_auto_auto] sm:items-start"
+          className="mb-6 grid gap-3 rounded-xl border border-gray-800 bg-gray-900/50 p-4 sm:grid-cols-[1fr_1fr_auto] sm:items-start"
         >
           <textarea
             className={`${input} resize-y`}
@@ -215,24 +214,6 @@ export default function Home() {
             onChange={(e) => setCidade(e.target.value)}
             required
           />
-          <label className="flex cursor-pointer items-center gap-2 py-2.5 text-sm text-gray-300 select-none">
-            <button
-              type="button"
-              role="switch"
-              aria-checked={enriquecer}
-              onClick={() => setEnriquecer((v) => !v)}
-              className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${
-                enriquecer ? "bg-blue-600" : "bg-gray-700"
-              }`}
-            >
-              <span
-                className={`absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white transition-transform ${
-                  enriquecer ? "translate-x-5" : ""
-                }`}
-              />
-            </button>
-            Enriquecer com CNPJ
-          </label>
           <button
             type="submit"
             disabled={carregando}
@@ -393,18 +374,7 @@ export default function Home() {
                 {l.endereco && (
                   <li className="flex gap-2">
                     <MapPin className="mt-0.5 h-4 w-4 shrink-0 text-gray-500" />
-                    {l.lat && l.lng ? (
-                      <a
-                        href={`https://www.openstreetmap.org/?mlat=${l.lat}&mlon=${l.lng}#map=18/${l.lat}/${l.lng}`}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="hover:text-blue-400"
-                      >
-                        {l.endereco}
-                      </a>
-                    ) : (
-                      l.endereco
-                    )}
+                    {l.endereco}
                   </li>
                 )}
                 {l.telefone && (
