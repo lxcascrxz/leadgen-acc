@@ -2,6 +2,9 @@ import type { Lead } from "@/lib/types";
 
 const PESQUISA_URL = "https://api.casadosdados.com.br/v5/cnpj/pesquisa?tipo_resultado=completo";
 const LIMITE_PADRAO = 100;
+const LIMITE_MIN = 10;
+// Acima de 1000 a API volta silenciosamente para 10 resultados
+const LIMITE_MAX = 1000;
 const TIMEOUT_MS = 30_000;
 
 type CasaDosDadosEmpresa = {
@@ -94,14 +97,24 @@ export async function GET(request: Request) {
   const bairro = searchParams.get("bairro")?.trim() ?? "";
   const cidade = searchParams.get("cidade")?.trim() ?? "";
   // Cada empresa retornada consome 1 crédito da Casa dos Dados
-  const limite = Math.min(Math.max(Number(searchParams.get("limite")) || LIMITE_PADRAO, 1), LIMITE_PADRAO);
+  const limite = Math.min(
+    Math.max(Math.floor(Number(searchParams.get("limite")) || LIMITE_PADRAO), LIMITE_MIN),
+    LIMITE_MAX
+  );
 
   if (!bairro || !cidade) {
     return Response.json({ error: "Informe bairro e cidade." }, { status: 400 });
   }
+  // Local: .env.local · Vercel: Settings → Environment Variables (ver README)
   const apiKey = process.env.CASA_DOS_DADOS_KEY;
   if (!apiKey) {
-    return Response.json({ error: "CASA_DOS_DADOS_KEY não configurada no .env.local." }, { status: 500 });
+    return Response.json(
+      {
+        error:
+          "CASA_DOS_DADOS_KEY não configurada. Localmente, crie o .env.local; na Vercel, adicione em Settings → Environment Variables e faça um novo deploy.",
+      },
+      { status: 500 }
+    );
   }
 
   try {
@@ -123,7 +136,13 @@ export async function GET(request: Request) {
       return Response.json({ error: "Chave da Casa dos Dados inválida." }, { status: 502 });
     }
     if (res.status === 403) {
-      return Response.json({ error: "Sem saldo de créditos na Casa dos Dados." }, { status: 402 });
+      // A API recusa a busca inteira quando o limite pedido passa do saldo, em vez de trazer só o que cabe
+      return Response.json(
+        {
+          error: `Saldo de créditos da Casa dos Dados insuficiente para trazer até ${limite} empresas. Diminua o "Máx. por bairro" ou recarregue os créditos.`,
+        },
+        { status: 402 }
+      );
     }
     if (!res.ok) {
       return Response.json({ error: `Casa dos Dados respondeu ${res.status}.` }, { status: 502 });

@@ -55,9 +55,21 @@ function formatarData(d: string) {
   return dia ? `${dia}/${m}/${a}` : d;
 }
 
+const LIMITE_PADRAO = 100;
+const LIMITE_MIN = 10;
+const LIMITE_MAX = 1000;
+
+function ajustarLimite(v: string) {
+  return Math.min(Math.max(Math.round(Number(v)) || LIMITE_PADRAO, LIMITE_MIN), LIMITE_MAX);
+}
+
+function truncar(s: string, max: number) {
+  return s.length > max ? s.slice(0, max - 1).trimEnd() + "…" : s;
+}
+
 function Estrelas({ n }: { n: number }) {
   if (n === 0) return null;
-  const titulo = ["", "Só telefone", "Telefone + email ou website", "Telefone + email + website"][n];
+  const titulo = ["", "Só telefone", "Telefone + email ou responsável", "Telefone + email + responsável"][n];
   return (
     <span className="inline-flex items-center gap-0.5" title={titulo} aria-label={`${n} de 3 estrelas`}>
       {Array.from({ length: n }, (_, i) => (
@@ -72,6 +84,8 @@ export default function Home() {
   const [cidade, setCidade] = useState("");
   const [progresso, setProgresso] = useState("");
   const [vendedores, setVendedores] = useState(1);
+  // Texto livre enquanto digita; vira número dentro da faixa no blur e na busca
+  const [limite, setLimite] = useState(String(LIMITE_PADRAO));
   const [leads, setLeads] = useState<Lead[]>([]);
   const [carregando, setCarregando] = useState(false);
   const [exportando, setExportando] = useState<"xlsx" | "csv" | null>(null);
@@ -113,6 +127,8 @@ export default function Home() {
       ).values()
     );
     if (!lista.length || !cidade.trim()) return;
+    const limiteValido = ajustarLimite(limite);
+    setLimite(String(limiteValido));
     setCarregando(true);
     setErro("");
     setAviso("");
@@ -129,7 +145,7 @@ export default function Home() {
     for (const [i, bairro] of lista.entries()) {
       setProgresso(`Buscando ${bairro}... ${i + 1}/${lista.length}`);
       try {
-        const params = new URLSearchParams({ bairro, cidade });
+        const params = new URLSearchParams({ bairro, cidade, limite: String(limiteValido) });
         const res = await fetch(`/api/buscar?${params}`);
         const data = await res.json();
         if (!res.ok) throw new Error(data.error ?? "Erro na busca");
@@ -197,7 +213,7 @@ export default function Home() {
 
         <form
           onSubmit={buscar}
-          className="mb-6 grid gap-3 rounded-xl border border-gray-800 bg-gray-900/50 p-4 sm:grid-cols-[1fr_1fr_auto] sm:items-start"
+          className="mb-6 grid gap-3 rounded-xl border border-gray-800 bg-gray-900/50 p-4 sm:grid-cols-[1fr_1fr_auto_auto] sm:items-start"
         >
           <textarea
             className={`${input} resize-y`}
@@ -214,6 +230,19 @@ export default function Home() {
             onChange={(e) => setCidade(e.target.value)}
             required
           />
+          <label className="flex flex-col gap-1 text-xs text-gray-400" title="Cada empresa nova consome 1 crédito da Casa dos Dados">
+            Máx. por bairro
+            <input
+              type="number"
+              min={LIMITE_MIN}
+              max={LIMITE_MAX}
+              step={10}
+              value={limite}
+              onChange={(e) => setLimite(e.target.value)}
+              onBlur={() => setLimite(String(ajustarLimite(limite)))}
+              className={`${input} w-28`}
+            />
+          </label>
           <button
             type="submit"
             disabled={carregando}
@@ -255,14 +284,14 @@ export default function Home() {
             <div className="relative">
               <Funnel className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-gray-500" />
               <select
-                className={`${input} pl-9 capitalize`}
+                className={`${input} pl-9`}
                 value={filtroTipo}
                 onChange={(e) => setFiltroTipo(e.target.value)}
               >
                 <option value="">Todos os tipos</option>
                 {tipos.map((t) => (
-                  <option key={t} value={t}>
-                    {t}
+                  <option key={t} value={t} title={t}>
+                    {truncar(t, 40)}
                   </option>
                 ))}
               </select>
@@ -348,9 +377,9 @@ export default function Home() {
                     {l.nome}
                   </h2>
                   <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                    <span className="inline-flex items-center gap-1 rounded-md bg-blue-500/10 px-2 py-0.5 text-xs text-blue-300 capitalize">
-                      <Building className="h-3 w-3" />
-                      {l.tipo}
+                    <span className="inline-flex items-center gap-1 rounded-md bg-blue-500/10 px-2 py-0.5 text-xs text-blue-300" title={l.tipo}>
+                      <Building className="h-3 w-3 shrink-0" />
+                      {truncar(l.tipo, 40)}
                     </span>
                     <span className="inline-flex items-center gap-1 rounded-md bg-gray-800 px-2 py-0.5 text-xs text-gray-300">
                       <MapPinned className="h-3 w-3" />
